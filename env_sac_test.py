@@ -1,14 +1,21 @@
+import gym
+from gym import spaces
 import numpy as np
 import matplotlib.pyplot as plt
+from stable_baselines3 import SAC
 
-class UAVSecureEnv:
+
+# Define the UAVSecureEnv environment following the Gym interface
+class UAVSecureEnv(gym.Env):
     def __init__(self, num_waypoints=2, seed=42):
+        super(UAVSecureEnv, self).__init__()
         np.random.seed(seed)
         self.np_random = np.random.default_rng(seed)
 
-        self.dt = 0.1
-        self.horizon_steps = 600
+        self.dt = 1  # time step
+        self.horizon_steps = 55  # max steps per episode
 
+        # Wireless channel and UAV parameters
         self.pathloss_exp = 2.2
         self.rician_K = 6.0
         self.beta0 = 1e4
@@ -17,13 +24,17 @@ class UAVSecureEnv:
         self.max_speed = 15.0
         self.energy_max = 150000.0
 
+        # HAP and Eve locations
         self.hap_pos = np.array([0.0, 0.0])
         self.eve_pos = self.np_random.uniform(-50, 50, size=(2,))
+
+        # Environment boundary (geofence)
         self.x_min, self.x_max = -450.0, 450.0
         self.y_min, self.y_max = -450.0, 450.0
 
+        # Waypoint generation
         self.num_waypoints = num_waypoints
-        self.waypoint_radius = 25
+        self.waypoint_radius = 100.0
         self.waypoints = []
         if self.num_waypoints >= 1:
             self.waypoints.append(self.np_random.uniform([150, 150], [200, 200]).astype(np.float32))
@@ -32,10 +43,26 @@ class UAVSecureEnv:
         self.waypoints = self.waypoints[:num_waypoints]
         self.visited = [False for _ in self.waypoints]
 
-        self.uav_init_pos = np.array([self.np_random.uniform(-100, -50), self.np_random.uniform(400, 450)], dtype=np.float32)
+        # Initial UAV position
+        self.uav_init_pos = np.array([self.np_random.uniform(-100, -50), self.np_random.uniform(400, 450)],
+                                     dtype=np.float32)
+
+        # State dimension: 10 features + flags for each waypoint
+        state_dim = 10 + self.num_waypoints
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
+
+        # Action space: [vx_ratio, vy_ratio, power_ratio]
+        self.action_space = spaces.Box(low=np.array([-1.0, -1.0, 0.0]),
+                                       high=np.array([1.0, 1.0, 1.0]),
+                                       dtype=np.float32)
+
         self.reset()
 
-    def reset(self):
+    # Modified reset to match Gymnasium format (returns obs, info)
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            np.random.seed(seed)
+            self.np_random = np.random.default_rng(seed)
         self.uav_pos = self.uav_init_pos.copy()
         self.uav_vel = np.array([0.0, 0.0])
         self.energy_remaining = self.energy_max
@@ -43,9 +70,10 @@ class UAVSecureEnv:
         self.current_wp_idx = 0
         self.visited = [False for _ in self.waypoints]
         self.trajectory = [self.uav_pos.copy()]
-        return self._get_state()
+        return self._get_state(), {}
 
     def _get_state(self):
+        # Return normalized state vector
         dx_h, dy_h = self.hap_pos - self.uav_pos
         dx_e, dy_e = self.eve_pos - self.uav_pos
         norm = 450.0
@@ -53,16 +81,18 @@ class UAVSecureEnv:
         waypoint_flags = [1.0 if v else 0.0 for v in self.visited]
         target_wp = self.waypoints[min(self.current_wp_idx, self.num_waypoints - 1)]
         wp_dx, wp_dy = target_wp - self.uav_pos
-        return np.array([
-            dx_h / norm, dy_h / norm,
-            dx_e / norm, dy_e / norm,
-            self.uav_vel[0] / vel_norm, self.uav_vel[1] / vel_norm,
-            self.energy_remaining / self.energy_max,
-            self.step_count / self.horizon_steps,
-            wp_dx / norm, wp_dy / norm
-        ] + waypoint_flags, dtype=np.float32)
+        state = np.array([
+                             dx_h / norm, dy_h / norm,
+                             dx_e / norm, dy_e / norm,
+                             self.uav_vel[0] / vel_norm, self.uav_vel[1] / vel_norm,
+                             self.energy_remaining / self.energy_max,
+                             self.step_count / self.horizon_steps,
+                             wp_dx / norm, wp_dy / norm
+                         ] + waypoint_flags, dtype=np.float32)
+        return state
 
     def step(self, action):
+        # Parse action into velocity and power control
         v_x = float(action[0]) * self.max_speed
         v_y = float(action[1]) * self.max_speed
         power_frac = np.clip(float(action[2]), 0.0, 1.0)
@@ -74,41 +104,43 @@ class UAVSecureEnv:
             v_x *= scale
             v_y *= scale
 
+        # Save previous position for trajectory smoothing
+        prev_pos = self.uav_pos.copy()
         self.uav_vel = np.array([v_x, v_y])
         self.uav_pos += self.uav_vel * self.dt
         self.trajectory.append(self.uav_pos.copy())
 
+        # Channel computation (SNR, secrecy rate)
         dist_h = np.linalg.norm(self.hap_pos - self.uav_pos) + 1e-6
         dist_e = np.linalg.norm(self.eve_pos - self.uav_pos) + 1e-6
         K = self.rician_K
         scatter_h = np.sqrt(0.5) * (np.random.normal() + 1j * np.random.normal())
         scatter_e = np.sqrt(0.5) * (np.random.normal() + 1j * np.random.normal())
-        h_main = np.sqrt(self.beta0 * dist_h**(-self.pathloss_exp)) * (
-            np.sqrt(K / (K + 1)) + np.sqrt(1 / (K + 1)) * scatter_h)
-        h_eve = np.sqrt(self.beta0 * dist_e**(-self.pathloss_exp)) * (
-            np.sqrt(K / (K + 1)) + np.sqrt(1 / (K + 1)) * scatter_e)
+        h_main = np.sqrt(self.beta0 * dist_h ** (-self.pathloss_exp)) * (
+                np.sqrt(K / (K + 1)) + np.sqrt(1 / (K + 1)) * scatter_h)
+        h_eve = np.sqrt(self.beta0 * dist_e ** (-self.pathloss_exp)) * (
+                np.sqrt(K / (K + 1)) + np.sqrt(1 / (K + 1)) * scatter_e)
 
-        gain_main = abs(h_main)**2
-        gain_eve = abs(h_eve)**2
+        gain_main = abs(h_main) ** 2
+        gain_eve = abs(h_eve) ** 2
         snr_main = (P_tx * gain_main) / self.sigma2
         snr_eve = (P_tx * gain_eve) / self.sigma2
         secrecy_rate = max(np.log2(1 + snr_main) - np.log2(1 + snr_eve), 0.0)
 
+        # Reward design
         reward = 0.0
         secrecy_weight = 3.0
         shaped_weight = 0.1
         shaped_scale = 0.01
         direction_weight = 12.0
-        # acc_weight = 0.5
         direction_power = 6
         speed_weight = 1.0
         speed_scale = 0.1
         time_penalty = -1
+
+        # Waypoint bonus
         waypoint_hit_bonus = 30.0
         success_bonus = 200.0
-
-        done = False
-
         if self.current_wp_idx < self.num_waypoints:
             current_wp = self.waypoints[self.current_wp_idx]
             dist_to_wp = np.linalg.norm(self.uav_pos - current_wp)
@@ -123,16 +155,10 @@ class UAVSecureEnv:
             target_wp = self.waypoints[-1]
 
         dist_to_wp = np.linalg.norm(self.uav_pos - target_wp)
-
         reward += secrecy_weight * secrecy_rate
         reward += shaped_weight / (1.0 + shaped_scale * dist_to_wp)
 
-        # if len(self.trajectory) >= 3:
-        #    prev_vel = (self.trajectory[-2] - self.trajectory[-3]) / self.dt
-        #    acc = np.linalg.norm((self.uav_vel - prev_vel) / self.dt)
-        #    reward += acc_weight * np.exp(-0.1 * acc)  # 加速度越小越好
-
-        # 使用预测位置方向替代当前速度方向
+        # Directional alignment reward
         future_pos = self.uav_pos + self.uav_vel * self.dt
         direction_vec = target_wp - future_pos
         norm_direction = np.linalg.norm(direction_vec) + 1e-6
@@ -143,11 +169,32 @@ class UAVSecureEnv:
         direction_reward = direction_weight * (alignment ** direction_power)
         reward += direction_reward
 
+        # Speed control reward
         ideal_speed = self.max_speed * 0.9
-        reward += speed_weight * np.exp(-speed_scale * (speed - ideal_speed)**2)
-
+        reward += speed_weight * np.exp(-speed_scale * (speed - ideal_speed) ** 2)
         reward += time_penalty
 
+        # Additional penalties
+        # 1. Out-of-bound penalty
+        if self.uav_pos[0] < self.x_min or self.uav_pos[0] > self.x_max or \
+                self.uav_pos[1] < self.y_min or self.uav_pos[1] > self.y_max:
+            reward -= 50
+
+        # 2. Average power penalty
+        used_energy = self.energy_max - self.energy_remaining
+        avg_power = used_energy / (self.step_count + 1)
+        target_avg_power = 0.8 * self.max_power
+        if avg_power > target_avg_power:
+            reward -= 20
+
+        # 3. Trajectory smoothness penalty
+        if len(self.trajectory) >= 3:
+            prev_vel = (self.trajectory[-2] - self.trajectory[-3]) / self.dt
+            acc = np.linalg.norm(self.uav_vel - prev_vel) / self.dt
+            reward -= 0.5 * acc
+
+        # Termination condition
+        done = False
         if self.energy_remaining <= 0 or self.step_count >= self.horizon_steps:
             done = True
             if all(self.visited):
@@ -156,9 +203,11 @@ class UAVSecureEnv:
         self.energy_remaining -= P_tx * self.dt
         self.step_count += 1
 
-        return self._get_state(), float(np.clip(reward, -50000, 50000)), done, {}
+        # Return Gym format: obs, reward, done, truncated, info
+        return self._get_state(), float(np.clip(reward, -50000, 50000)), done, False, {}
 
     def render(self):
+        # Visualize UAV trajectory and environment
         traj = np.array(self.trajectory)
         current_wp_idx = min(self.current_wp_idx, self.num_waypoints)
         plt.figure(figsize=(8, 8))
@@ -180,11 +229,11 @@ class UAVSecureEnv:
             edge_color = 'red' if i == current_wp_idx else 'black'
             plt.scatter(wp[0], wp[1], s=80, color=marker_color,
                         edgecolors=edge_color, linewidths=1.5,
-                        label=f'WP{i+1}' if i == 0 else "")
-            plt.text(wp[0]+5, wp[1]+5, f'WP{i+1}', fontsize=10, color='black')
+                        label=f'WP{i + 1}' if i == 0 else "")
+            plt.text(wp[0] + 5, wp[1] + 5, f'WP{i + 1}', fontsize=10, color='black')
 
-        for idx in range(0, len(traj), max(1, len(traj)//10)):
-            plt.text(traj[idx, 0]+2, traj[idx, 1]+2, f'{idx}', fontsize=8, color='darkgray')
+        for idx in range(0, len(traj), max(1, len(traj) // 10)):
+            plt.text(traj[idx, 0] + 2, traj[idx, 1] + 2, f'{idx}', fontsize=8, color='darkgray')
 
         plt.xlabel(r'$X$ (m)', fontsize=12)
         plt.ylabel(r'$Y$ (m)', fontsize=12)
