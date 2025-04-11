@@ -6,8 +6,8 @@ class UAVSecureEnv:
         np.random.seed(seed)
         self.np_random = np.random.default_rng(seed)
 
-        self.dt = 1
-        self.horizon_steps = 80
+        self.dt = 0.1
+        self.horizon_steps = 600
 
         self.pathloss_exp = 2.2
         self.rician_K = 6.0
@@ -23,7 +23,7 @@ class UAVSecureEnv:
         self.y_min, self.y_max = -450.0, 450.0
 
         self.num_waypoints = num_waypoints
-        self.waypoint_radius = 100.0
+        self.waypoint_radius = 25
         self.waypoints = []
         if self.num_waypoints >= 1:
             self.waypoints.append(self.np_random.uniform([150, 150], [200, 200]).astype(np.float32))
@@ -96,14 +96,15 @@ class UAVSecureEnv:
 
         reward = 0.0
         secrecy_weight = 3.0
-        shaped_weight = 2.0
+        shaped_weight = 0.1
         shaped_scale = 0.01
-        direction_weight = 5.0
-        direction_power = 4
+        direction_weight = 12.0
+        # acc_weight = 0.5
+        direction_power = 6
         speed_weight = 1.0
         speed_scale = 0.1
         time_penalty = -1
-        waypoint_hit_bonus = 20.0
+        waypoint_hit_bonus = 30.0
         success_bonus = 200.0
 
         done = False
@@ -125,6 +126,11 @@ class UAVSecureEnv:
 
         reward += secrecy_weight * secrecy_rate
         reward += shaped_weight / (1.0 + shaped_scale * dist_to_wp)
+
+        # if len(self.trajectory) >= 3:
+        #    prev_vel = (self.trajectory[-2] - self.trajectory[-3]) / self.dt
+        #    acc = np.linalg.norm((self.uav_vel - prev_vel) / self.dt)
+        #    reward += acc_weight * np.exp(-0.1 * acc)  # 加速度越小越好
 
         # 使用预测位置方向替代当前速度方向
         future_pos = self.uav_pos + self.uav_vel * self.dt

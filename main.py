@@ -8,7 +8,7 @@ import torch.nn as nn
 from env import UAVSecureEnv
 from model import ActorCritic
 
-def get_exploration_scale(iteration, max_iter, init_scale=1.8, final_scale=0.25):
+def get_exploration_scale(iteration, max_iter, init_scale=2.5, final_scale=2.0):
     scale = init_scale - (init_scale - final_scale) * (iteration / max_iter)
     return max(scale, final_scale)
 
@@ -34,13 +34,13 @@ if __name__ == '__main__':
     state_dim = len(env.reset())
     action_dim = 3
     model = ActorCritic(state_dim, action_dim)
-    optimizer = optim.Adam(model.parameters(), lr=2e-4)
+    optimizer = optim.Adam(model.parameters(), lr=7e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
     gamma = 0.98
     lam = 0.95
     clip_eps = 0.1
-    train_iters = 1000
+    train_iters = 2000
     episodes_per_iter = 30
     reward_history = []
 
