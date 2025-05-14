@@ -1,7 +1,6 @@
 import numpy as np
 import math
 
-
 def dB_to_normal(db_val):
     return 10 ** (db_val / 10)
 
